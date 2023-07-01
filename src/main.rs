@@ -1,10 +1,12 @@
+#![feature(const_option_ext)]
+
 use std::{
-    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    net::{SocketAddr, TcpListener, TcpStream},
     panic::catch_unwind,
     time::Duration,
 };
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use async_io::block_on;
 use embassy_futures::select::{select3, Either3};
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
@@ -27,10 +29,20 @@ use smol::{
 
 const SSID: &str = env!("PROXY_SSID");
 const PASS: &str = env!("PROXY_PASS");
-const PORT: &str = env!("PROXY_PORT");
-const TUNNEL_TIMEOUT: Option<&str> = option_env!("PROXY_TUNNEL_TIMEOUT");
-const TUNNEL_BUF_SIZE: Option<&str> = option_env!("PROXY_TUNNEL_BUF_SIZE");
-const NUM_SOCKETS: Option<&str> = option_env!("PROXY_NUM_SOCKETS");
+const PORT: u16 = str_to_usize(env!("PROXY_PORT")) as u16;
+const TUNNEL_TIMEOUT: usize = option_env!("PROXY_TUNNEL_TIMEOUT")
+    .map(str_to_usize)
+    .unwrap_or(1000);
+const TUNNEL_BUF_SIZE: usize = option_env!("PROXY_TUNNEL_BUF_SIZE")
+    .map(str_to_usize)
+    .unwrap_or(6114);
+
+/// The number of sockets (which use file descriptors) open at the same time.
+/// Too many would consume too many resources and too few would result in lower performance.
+/// From limited testing, the default value seems to be the sweet spot.
+const NUM_SOCKETS: usize = option_env!("PROXY_NUM_SOCKETS")
+    .map(str_to_usize)
+    .unwrap_or(16);
 
 const PROXY_OK_RESP: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 const HTTP_EOF: &[u8] = b"\r\n\r\n";
@@ -54,17 +66,12 @@ fn main() {
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    // The number of sockets (which use file descriptors) open at the same time.
-    // Too many would consume too many resources and too few would result in lower performance.
-    // From limited testing, the default value seems to be the sweet spot.
-    let num_sockets: usize = NUM_SOCKETS.map(|v| v.parse()).unwrap_or(Ok(16)).unwrap();
-
     // Set the limit for file descriptors
     #[allow(clippy::needless_update)]
     {
         esp_idf_sys::esp!(unsafe {
             esp_idf_sys::esp_vfs_eventfd_register(&esp_idf_sys::esp_vfs_eventfd_config_t {
-                max_fds: num_sockets,
+                max_fds: NUM_SOCKETS,
                 ..Default::default()
             })
         })
@@ -137,10 +144,7 @@ async fn run() -> Result<()> {
 ///
 /// An error can really only arise from the listener setup.
 async fn start_proxy() -> Result<()> {
-    let buf_size = TUNNEL_BUF_SIZE.map(|v| v.parse()).unwrap_or(Ok(6144))?;
-    let timeout = TUNNEL_TIMEOUT.map(|v| v.parse()).unwrap_or(Ok(1000))?;
-    let port = PORT.parse()?;
-    let listener = smol::Async::<TcpListener>::bind(([0, 0, 0, 0], port))?;
+    let listener = smol::Async::<TcpListener>::bind(([0, 0, 0, 0], PORT))?;
 
     loop {
         let (src_stream, peer_addr) = match listener.accept().await {
@@ -153,16 +157,14 @@ async fn start_proxy() -> Result<()> {
 
         info!("Client accepted: {}", peer_addr);
 
-        EXECUTOR
-            .spawn(proxy_wrapper(src_stream, timeout, buf_size))
-            .detach();
+        EXECUTOR.spawn(proxy_wrapper(src_stream)).detach();
     }
 }
 
 /// A wrapper with the sole purpose of logging errors
 /// encountered in the proxy tunnel.
-async fn proxy_wrapper(src_stream: smol::Async<TcpStream>, timeout: u64, buf_size: usize) {
-    if let Err(e) = proxy(src_stream, timeout, buf_size).await {
+async fn proxy_wrapper(src_stream: smol::Async<TcpStream>) {
+    if let Err(e) = proxy(src_stream).await {
         error!("Proxy error: {e:?}");
     }
 }
@@ -180,13 +182,9 @@ async fn proxy_wrapper(src_stream: smol::Async<TcpStream>, timeout: u64, buf_siz
 /// - the actual request to be proxied is not preceded by an `HTTP CONNECT` request
 /// - parsing the destination server host fails
 /// - connecting a [`TcpStream`] to the destination server fails
-async fn proxy(
-    mut src_stream: smol::Async<TcpStream>,
-    timeout: u64,
-    buf_size: usize,
-) -> Result<()> {
+async fn proxy(mut src_stream: smol::Async<TcpStream>) -> Result<()> {
     // Buffer that will be used for read/write operations.
-    let mut buf = vec![0; buf_size].into_boxed_slice();
+    let mut buf = vec![0; TUNNEL_BUF_SIZE].into_boxed_slice();
 
     // Read and parse the initial request.
     // It will generally always fit inside a single packet.
@@ -210,7 +208,7 @@ async fn proxy(
 
     info!("Proxying request...");
 
-    tunnel(src_stream, dest_stream, &mut buf, timeout).await?;
+    tunnel(src_stream, dest_stream, &mut buf).await?;
 
     info!("Response sent back to client!");
 
@@ -242,7 +240,6 @@ async fn tunnel(
     mut src_stream: smol::Async<TcpStream>,
     mut dest_stream: smol::Async<TcpStream>,
     buf: &mut [u8],
-    timeout: u64,
 ) -> Result<()> {
     // Reuse the same buffer for both read operations, because RAM be limited.
     //
@@ -266,7 +263,7 @@ async fn tunnel(
         let res = select3(
             sock_read(&mut src_stream, buf1),
             sock_read(&mut dest_stream, buf2),
-            smol::Timer::after(Duration::from_millis(timeout)),
+            smol::Timer::after(Duration::from_millis(TUNNEL_TIMEOUT as u64)),
         )
         .await;
 
@@ -344,7 +341,22 @@ fn parse_initial_req(req_str: &str) -> Result<SocketAddr> {
         bail!("missing host from request");
     };
 
-    let sock_addr = host.parse()?;
+    let sock_addr = host.into()?;
 
     Ok(sock_addr)
+}
+
+/// Helper to allow converting a string slice (essentially from env variables)
+/// to usize at compile time.
+const fn str_to_usize(env: &str) -> usize {
+    let mut bytes = env.as_bytes();
+    let mut val = 0;
+
+    while let [byte, rest @ ..] = bytes {
+        assert!(b'0' <= *byte && *byte <= b'9', "invalid digit");
+        val = val * 10 + (*byte - b'0') as usize;
+        bytes = rest;
+    }
+
+    val
 }
