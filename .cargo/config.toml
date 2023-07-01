@@ -3,8 +3,8 @@ target = "xtensa-esp32-espidf"
 
 [target.xtensa-esp32-espidf]
 linker = "ldproxy"
-# runner = "espflash --monitor" # Select this runner for espflash v1.x.x
-runner = "espflash --monitor --speed 460800" # Select this runner for espflash v2.x.x
+runner = "espflash --monitor" # Select this runner for espflash v1.x.x
+# runner = "espflash flash --monitor" # Select this runner for espflash v2.x.x
 
 
 [unstable]

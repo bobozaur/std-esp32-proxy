@@ -30,11 +30,8 @@ const PASS: &str = env!("PROXY_PASS");
 const PORT: &str = env!("PROXY_PORT");
 const TUNNEL_TIMEOUT: Option<&str> = option_env!("PROXY_TUNNEL_TIMEOUT");
 const TUNNEL_BUF_SIZE: Option<&str> = option_env!("PROXY_TUNNEL_BUF_SIZE");
+const NUM_SOCKETS: Option<&str> = option_env!("PROXY_NUM_SOCKETS");
 
-/// The number of sockets (which use file descriptors) open at the same time.
-/// Too many would consume too many resources and too few would result in lower performance.
-/// From limited testing, this value seems to be the sweet spot.
-const NUM_SOCKETS: usize = 16;
 const PROXY_OK_RESP: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 const HTTP_EOF: &[u8] = b"\r\n\r\n";
 
@@ -57,12 +54,17 @@ fn main() {
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
 
+    // The number of sockets (which use file descriptors) open at the same time.
+    // Too many would consume too many resources and too few would result in lower performance.
+    // From limited testing, the default value seems to be the sweet spot.
+    let num_sockets: usize = NUM_SOCKETS.map(|v| v.parse()).unwrap_or(Ok(16)).unwrap();
+
     // Set the limit for file descriptors
     #[allow(clippy::needless_update)]
     {
         esp_idf_sys::esp!(unsafe {
             esp_idf_sys::esp_vfs_eventfd_register(&esp_idf_sys::esp_vfs_eventfd_config_t {
-                max_fds: NUM_SOCKETS,
+                max_fds: num_sockets,
                 ..Default::default()
             })
         })
@@ -136,7 +138,7 @@ async fn run() -> Result<()> {
 /// An error can really only arise from the listener setup.
 async fn start_proxy() -> Result<()> {
     let buf_size = TUNNEL_BUF_SIZE.map(|v| v.parse()).unwrap_or(Ok(6144))?;
-    let timeout = TUNNEL_TIMEOUT.map(|v| v.parse()).unwrap_or(Ok(1))?;
+    let timeout = TUNNEL_TIMEOUT.map(|v| v.parse()).unwrap_or(Ok(1000))?;
     let port = PORT.parse()?;
     let listener = smol::Async::<TcpListener>::bind(([0, 0, 0, 0], port))?;
 
@@ -264,7 +266,7 @@ async fn tunnel(
         let res = select3(
             sock_read(&mut src_stream, buf1),
             sock_read(&mut dest_stream, buf2),
-            smol::Timer::after(Duration::from_secs(timeout)),
+            smol::Timer::after(Duration::from_millis(timeout)),
         )
         .await;
 
