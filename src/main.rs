@@ -1,7 +1,7 @@
 #![feature(const_option_ext)]
 
 use std::{
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     panic::catch_unwind,
     time::Duration,
 };
@@ -189,8 +189,8 @@ async fn proxy(mut src_stream: smol::Async<TcpStream>) -> Result<()> {
     // Read and parse the initial request.
     // It will generally always fit inside a single packet.
     let n = sock_read(&mut src_stream, &mut buf).await?;
-    let req_str = std::str::from_utf8(&buf[..n])?;
-    let host = parse_initial_req(req_str)?;
+    let request = std::str::from_utf8(&buf[..n])?;
+    let sock_addr = extract_sock_addr(request)?;
 
     // Ensure we read the entire CONNECT request,
     // even if we most probably already did.
@@ -198,9 +198,9 @@ async fn proxy(mut src_stream: smol::Async<TcpStream>) -> Result<()> {
         src_stream.read(&mut buf).await?;
     }
 
-    let dest_stream = smol::Async::<TcpStream>::connect(host).await?;
+    let dest_stream = smol::Async::<TcpStream>::connect(sock_addr).await?;
 
-    info!("Connected to destination {host}!");
+    info!("Connected to destination {sock_addr}!");
 
     // Respond to the client
     src_stream.write_all(PROXY_OK_RESP).await?;
@@ -325,10 +325,10 @@ async fn sock_read(socket: &mut smol::Async<TcpStream>, buf: &mut [u8]) -> Resul
 /// - the request data is insufficient/malformed.
 /// - the request is not a `CONNECT` request
 /// - parsing the host to a [`SocketAddr`] fails
-fn parse_initial_req(req_str: &str) -> Result<SocketAddr> {
-    let mut req_iter = req_str.split_whitespace();
+fn extract_sock_addr(request: &str) -> Result<SocketAddr> {
+    let mut req_iter = request.split_whitespace();
     let Some(method) = req_iter.next() else {
-        bail!("can't determine the HTTP method from request data: {req_str}");
+        bail!("can't determine the HTTP method from request data: {request}");
     };
 
     if method != "CONNECT" {
@@ -341,7 +341,9 @@ fn parse_initial_req(req_str: &str) -> Result<SocketAddr> {
         bail!("missing host from request");
     };
 
-    let sock_addr = host.into()?;
+    let Some(sock_addr) = host.to_socket_addrs()?.next() else {
+        bail!("could not resolve any socket address from {host}");
+    };
 
     Ok(sock_addr)
 }
