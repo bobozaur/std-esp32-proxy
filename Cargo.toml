@@ -1,0 +1,53 @@
+[package]
+name = "std-esp32-proxy"
+version = "0.1.0"
+authors = ["Bogdan Mircea <mirceapetrebogdan@gmail.com>"]
+edition = "2021"
+resolver = "2"
+rust-version = "1.66"
+
+[profile.release]
+opt-level = 3
+strip = "symbols"
+
+[profile.dev]
+debug = true    # Symbols are nice and they don't increase the size on Flash
+opt-level = "z"
+
+[features]
+default = ["std"]
+
+std = [
+    "alloc",
+    "anyhow/std",
+    "log/std",
+    "esp-idf-sys/std",
+    "esp-idf-hal/std",
+    "embedded-svc/std",
+]
+
+alloc = ["esp-idf-hal/alloc", "embedded-svc/alloc"]
+
+[dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+log = "0.4"
+url = "2"
+esp-idf-sys = { version = "0.33", features = ["binstart"] }
+esp-idf-svc = "0.46"
+esp-idf-hal = "0.41"
+embedded-svc = "0.25"
+embedded-hal = "0.2"
+smol = "1.2"
+async-io = "=1.12"
+atoi = "2.0.0"
+embassy-futures = "0.1.0"
+once_cell = "1.18.0"
+
+[build-dependencies]
+embuild = { version = "0.31.2", features = ["elf"] }
+anyhow = "1"
+
+[patch.crates-io]
+smol = { git = "https://github.com/esp-rs-compat/smol" }
+polling = { git = "https://github.com/esp-rs-compat/polling" }
+socket2 = { git = "https://github.com/esp-rs-compat/socket2" }
